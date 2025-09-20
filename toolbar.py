@@ -1,0 +1,3 @@
+import wx
+
+class MainToolbar(wx.ToolBar): ...
