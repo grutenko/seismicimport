@@ -5,6 +5,27 @@ from menu import MainMenu
 from statusbar import MainStatusBar
 from widgets.task import Task, TaskJob
 
+import logging
+
+class MemoryHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(self.format(record))
+
+    def get_logs(self):
+        return self.records
+
+logger = logging.getLogger("runtime")
+logger.setLevel(logging.DEBUG)
+
+memory_handler = MemoryHandler()
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+memory_handler.setFormatter(formatter)
+logger.addHandler(memory_handler)
+
 
 class SaveExcelJob(TaskJob):
     def __init__(self, main_window, save_as):
@@ -14,39 +35,44 @@ class SaveExcelJob(TaskJob):
 
     def run(self):
         p = self.main_window
+        date_col = p.date_field.GetStrings()[p.date_field.GetSelection()]
         x_col = p.x_field.GetStrings()[p.x_field.GetSelection()]
         y_col = p.y_field.GetStrings()[p.y_field.GetSelection()]
         z_col = p.z_field.GetStrings()[p.z_field.GetSelection()]
         value_col = p.value_field.GetStrings()[p.value_field.GetSelection()]
+        type_id_col = p.type_col_field.GetStrings()[p.type_col_field.GetSelection()]
         comment_col = p.comment_field.GetStrings()[p.comment_field.GetSelection()]
-        type_id_col = p.type_col_field.GetStrings()[
-            p.type_col_field.GetSelection()
-        ]
         filename_col = p.source_file_field.GetStrings()[
             p.source_file_field.GetSelection()
         ]
         df = pd.read_excel(
             p.xls,
             usecols=[
+                date_col,
+                type_id_col,
                 x_col,
                 y_col,
                 z_col,
                 value_col,
                 comment_col,
-                type_id_col,
                 filename_col,
             ],
             na_filter=False,
         )
         df = p.filter(df)
-        df = df.drop(columns=[filename_col, comment_col])
-        df_str = df.applymap(lambda x: str(x).replace(".", ",") if isinstance(x, float) else x)
+        try:
+            df = df.drop(columns=[filename_col, comment_col])
+        except Exception:
+            ...
+        df_str = df.map(
+            lambda x: str(x).replace(".", ",") if isinstance(x, float) else x
+        )
         df_str.to_excel(self.save_as, index=False)
 
 
 class MainWindow(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1100, 700))
+        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1100, 600))
         self.xls = None
         self.header = None
         self.menu = MainMenu()
@@ -99,14 +125,16 @@ class MainWindow(wx.Frame):
         l_sz_in_h.Add(self.value_field)
         l_sz_in.Add(l_sz_in_h, 0, wx.EXPAND | wx.BOTTOM, border=10)
         l_sz_in_h = wx.FlexGridSizer(2, 4, 5, 5)
+        label = wx.StaticText(self.left, label="Дата:")
+        l_sz_in_h.Add(label)
         label = wx.StaticText(self.left, label="Тип:")
         l_sz_in_h.Add(label)
         label = wx.StaticText(self.left, label="Комментарий:")
         l_sz_in_h.Add(label)
         label = wx.StaticText(self.left, label="Исходный файл:")
         l_sz_in_h.Add(label)
-        label = wx.StaticText(self.left, label="")
-        l_sz_in_h.Add(label)
+        self.date_field = wx.Choice(self.left)
+        l_sz_in_h.Add(self.date_field)
         self.type_col_field = wx.Choice(self.left)
         l_sz_in_h.Add(self.type_col_field)
         self.comment_field = wx.Choice(self.left)
@@ -161,11 +189,12 @@ class MainWindow(wx.Frame):
         l_sz.Add(l_sz_in, 1, wx.EXPAND | wx.ALL, border=10)
         self.left.SetSizer(l_sz)
         self.right = wx.ListCtrl(self.splitter, style=wx.LC_REPORT)
+        self.right.AppendColumn("Дата")
+        self.right.AppendColumn("Тип")
         self.right.AppendColumn("X")
         self.right.AppendColumn("Y")
         self.right.AppendColumn("Z")
         self.right.AppendColumn("Значение")
-        self.right.AppendColumn("Тип")
         self.right.AppendColumn("Комментарий")
         self.right.AppendColumn("Исходный файл")
         self.splitter.SetMinimumPaneSize(250)
@@ -196,10 +225,11 @@ class MainWindow(wx.Frame):
 
     def on_save(self, event):
         with wx.FileDialog(
-            self, "Сохранить Excel", wildcard="Excel файлы (*.xlsx)|*.xlsx",
-            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT
+            self,
+            "Сохранить Excel",
+            wildcard="Excel файлы (*.xlsx)|*.xlsx",
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         ) as dlg:
-
             if dlg.ShowModal() == wx.ID_CANCEL:
                 return  # пользователь отменил
 
@@ -208,8 +238,14 @@ class MainWindow(wx.Frame):
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
 
-            self.save_task = Task("Сохранение файла", "идет сохранение файла...", SaveExcelJob(self, path), parent=self, can_abort=False)
-            self.save_task.then(lambda a: ..., lambda e: ...)
+            self.save_task = Task(
+                "Сохранение файла",
+                "идет сохранение файла...",
+                SaveExcelJob(self, path),
+                parent=self,
+                can_abort=False,
+            )
+            self.save_task.then(lambda a: ..., lambda e: print(e))
             self.save_task.run()
 
     def on_select_excell_list(self, event):
@@ -239,6 +275,9 @@ class MainWindow(wx.Frame):
         self.source_file_field.Clear()
         for item in self.header:
             self.source_file_field.Append(item)
+        self.date_field.Clear()
+        for item in self.header:
+            self.date_field.Append(item)
 
         self.suggest_columns()
         self.suggest_filter()
@@ -295,27 +334,28 @@ class MainWindow(wx.Frame):
                             field.SetSelection(len(field.GetItems()) - 1)
                     break
 
-        sugg(self.x_field, "dict/x_columns_dict.txt", ["EX", "X"], 0)
-        sugg(self.y_field, "dict/y_columns_dict.txt", ["EY", "Y"], 1)
-        sugg(self.z_field, "dict/z_columns_dict.txt", ["EZ", "Z"], 2)
-        sugg(self.value_field, "dict/value_columns_dict.txt", ["EEnergy", "Energy"], 3)
+        sugg(self.x_field, "dict/cols/x.txt", ["EX", "X"], 0)
+        sugg(self.y_field, "dict/cols/y.txt", ["EY", "Y"], 1)
+        sugg(self.z_field, "dict/cols/z.txt", ["EZ", "Z"], 2)
+        sugg(self.value_field, "dict/cols/value.txt", ["EEnergy", "Energy"], 3)
+        sugg(self.date_field, "dict/cols/date.txt", ["ELocTime"], 4)
         sugg(
             self.type_col_field,
-            "dict/type_id_columns_dict.txt",
+            "dict/cols/type_id.txt",
             ["ETypeId", "TypeId"],
-            4,
-        )
-        sugg(
-            self.comment_field,
-            "dict/comment_columns_dict.txt",
-            ["EComment", "Comment"],
             5,
         )
         sugg(
-            self.source_file_field,
-            "dict/source_filename_columns_dict.txt",
-            ["ESourseFileName", "ESourceFileName", "SourceFileName"],
+            self.comment_field,
+            "dict/cols/comment.txt",
+            ["EComment", "Comment"],
             6,
+        )
+        sugg(
+            self.source_file_field,
+            "dict/cols/source_filename.txt",
+            ["ESourseFileName", "ESourceFileName", "SourceFileName"],
+            7,
         )
 
     def suggest_filter(self):
@@ -353,6 +393,17 @@ class MainWindow(wx.Frame):
         checked_indices = self.type_field.GetCheckedItems()
         selected_types = [self.type_field.GetString(i) for i in checked_indices]
 
+        comment_blacklist = []
+        try:
+            with open("dict/comments/kir.txt") as f:
+                comment_blacklist.extend(f.readlines())
+        except Exception:
+            ...
+        try:
+            with open("dict/comments/ras.txt") as f:
+                comment_blacklist.extend(f.readlines())
+        except Exception:
+            ...
         filename_mask = ()
         if self.field_field.IsChecked(0) and self.field_field.IsChecked(1):
             filename_mask = (".KIR", ".RAS")
@@ -362,12 +413,13 @@ class MainWindow(wx.Frame):
             filename_mask = ".RAS"
 
         df = df[
-            (df[x_col].notna() & (df[x_col] != ""))
-            & (df[y_col].notna() & (df[y_col] != ""))
-            & (df[z_col].notna() & (df[z_col] != ""))
-            & (df[value_col].notna() & (df[value_col] != ""))
+            (df[x_col] != "")
+            & (df[y_col] != "")
+            & (df[z_col] != "")
+            & (df[value_col] != "")
             & df[type_id_col].astype(str).isin(selected_types)
             & df[filename_col].str.endswith(filename_mask, na=False)
+            & ~df[comment_col].isin(comment_blacklist)
         ]
         return df
 
@@ -375,6 +427,7 @@ class MainWindow(wx.Frame):
         x_col = self.x_field.GetStrings()[self.x_field.GetSelection()]
         y_col = self.y_field.GetStrings()[self.y_field.GetSelection()]
         z_col = self.z_field.GetStrings()[self.z_field.GetSelection()]
+        date_col = self.date_field.GetStrings()[self.date_field.GetSelection()]
         value_col = self.value_field.GetStrings()[self.value_field.GetSelection()]
         comment_col = self.comment_field.GetStrings()[self.comment_field.GetSelection()]
         type_id_col = self.type_col_field.GetStrings()[
@@ -390,6 +443,7 @@ class MainWindow(wx.Frame):
                 y_col,
                 z_col,
                 value_col,
+                date_col,
                 comment_col,
                 type_id_col,
                 filename_col,
@@ -404,11 +458,12 @@ class MainWindow(wx.Frame):
         for index, row in df.iterrows():
             self.append_row(
                 [
+                    row[date_col],
+                    row[type_id_col],
                     row[x_col],
                     row[y_col],
                     row[z_col],
                     row[value_col],
-                    row[type_id_col],
                     row[comment_col],
                     row[filename_col],
                 ]
