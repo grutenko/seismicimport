@@ -72,7 +72,7 @@ class SaveExcelJob(TaskJob):
 
 class MainWindow(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1100, 600))
+        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1600, 600))
         self.xls = None
         self.header = None
         self.menu = MainMenu()
@@ -173,7 +173,8 @@ class MainWindow(wx.Frame):
         t_sz.Add(t_sz_in)
         self.field_field = wx.CheckListBox(self.left)
         self.field_field.Append("Кировский")
-        self.field_field.Append("Рассвумчеррский")
+        self.field_field.Append("Рассвумчоррский")
+        self.field_field.Check(0)
         t_sz.Add(self.field_field, 1, wx.EXPAND)
         l_sz_in_h.Add(t_sz)
         l_sz_in.Add(l_sz_in_h, 0, wx.EXPAND | wx.BOTTOM, border=10)
@@ -199,7 +200,7 @@ class MainWindow(wx.Frame):
         self.right.AppendColumn("Исходный файл")
         self.splitter.SetMinimumPaneSize(250)
         self.splitter.SetSashGravity(0)
-        self.splitter.SplitVertically(self.left, self.right, 500)
+        self.splitter.SplitVertically(self.left, self.right, 550)
         sz.Add(self.splitter, 1, wx.EXPAND)
         self.SetSizer(sz)
         self.Layout()
@@ -301,6 +302,9 @@ class MainWindow(wx.Frame):
         if not os.path.exists(path):
             wx.MessageBox("Неверный файл: %s" % path)
             return
+        
+        info = wx.BusyInfo("Загрузка данных, пожалуйста подождите...", parent=self.left)
+        wx.Yield()  # даём GUI обновиться
 
         self.xls = pd.ExcelFile(path)
         lis_ = self.xls.sheet_names
@@ -314,6 +318,8 @@ class MainWindow(wx.Frame):
         self.on_select_excell_list(event)
         self.render_grid()
         self.update_controls_state()
+
+        del info
 
     def suggest_columns(self):
         def sugg(field, sugg_dict_file, fallback_sugg_dict, default_offset):
@@ -424,6 +430,11 @@ class MainWindow(wx.Frame):
         return df
 
     def render_grid(self, event=None):
+        if self.xls is None:
+            return
+
+        info = wx.BusyInfo("Загрузка данных, пожалуйста подождите...", parent=self.left)
+        wx.Yield()  # даём GUI обновиться
         x_col = self.x_field.GetStrings()[self.x_field.GetSelection()]
         y_col = self.y_field.GetStrings()[self.y_field.GetSelection()]
         z_col = self.z_field.GetStrings()[self.z_field.GetSelection()]
@@ -471,3 +482,5 @@ class MainWindow(wx.Frame):
 
         for col in range(self.right.GetColumnCount()):
             self.right.SetColumnWidth(col, wx.LIST_AUTOSIZE)
+
+        del info
