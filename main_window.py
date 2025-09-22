@@ -1,6 +1,6 @@
 import wx
 import pandas as pd
-
+import fnmatch
 from menu import MainMenu
 from statusbar import MainStatusBar
 from widgets.task import Task, TaskJob
@@ -383,7 +383,6 @@ class MainWindow(wx.Frame):
             self.excell_list_field.SetSelection(0)
 
         self.on_select_excell_list(event)
-        self.render_grid()
         self.update_controls_state()
 
         del info
@@ -496,23 +495,24 @@ class MainWindow(wx.Frame):
         selected_types = [self.type_field.GetString(i) for i in checked_indices]
         sort_by_field = self.field_group_checkbox.IsChecked()
 
-        comment_blacklist = []
+        kir_comment_blacklist = []
         try:
             with open("dict/blacklist/kir.txt", "r", encoding="utf-8") as f:
                 lines = f.readlines()
-                lines = [line.strip() for line in lines]
-                comment_blacklist.extend(lines)
+                lines = [line.strip() for line in lines if line and line.strip()]
+                kir_comment_blacklist.extend(lines)
         except Exception:
             ...
+        ras_comment_blacklist = []
         try:
             with open("dict/blacklist/ras.txt", "r", encoding="utf-8") as f:
                 lines = f.readlines()
-                lines = [line.strip() for line in lines]
-                comment_blacklist.extend(lines)
+                lines = [line.strip() for line in lines if line and line.strip()]
+                ras_comment_blacklist.extend(lines)
         except Exception:
             ...
 
-
+        print(kir_comment_blacklist, ras_comment_blacklist)
         filename_mask = ()
         if self.field_field.IsChecked(0) and self.field_field.IsChecked(1):
             filename_mask = (".KIR", ".RAS")
@@ -521,17 +521,21 @@ class MainWindow(wx.Frame):
         elif self.field_field.IsChecked(1):
             filename_mask = ".RAS"
 
-        print(comment_blacklist)
-        df = df[
+        mask = (
             (df[x_col] != "")
             & (df[y_col] != "")
             & (df[z_col] != "")
             & (df[value_col] != "")
             & df[type_id_col].astype(str).isin(selected_types)
             & df[filename_col].str.endswith(filename_mask, na=False)
-            & ~df[comment_col].str.strip().isin(comment_blacklist)
-        ]
-        df = df.copy()
+        )
+        kir_mask = ~df[filename_col].str.endswith(".KIR", na=False) | ~df[comment_col].str.strip().apply(
+            lambda x: any(fnmatch.fnmatch(x, p) for p in kir_comment_blacklist)
+        )
+        ras_mask = ~df[filename_col].str.endswith(".RAS", na=False) | ~df[comment_col].str.strip().apply(
+            lambda x: any(fnmatch.fnmatch(x, p) for p in ras_comment_blacklist)
+        )
+        df = df[mask & kir_mask & ras_mask].copy()
         if sort_by_field:
             df.loc[:, 'suffix'] = df[filename_col].str[-4:]
             df = df.sort_values(by=["suffix"])

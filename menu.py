@@ -1,6 +1,7 @@
 import sys
 import wx
 import os
+import subprocess
 
 class MainMenu(wx.MenuBar):
     def __init__(self):
@@ -48,7 +49,10 @@ class MainMenu(wx.MenuBar):
             open(filename, "a").close()
         except Exception as e:
             print(f"Error opening file: {e}")
-        os.startfile(filename)
+        if sys.platform.startswith("linux"):
+            subprocess.run(["xdg-open", filename])
+        else:
+            os.startfile(filename)
 
     def on_column_x(self, event):
         self.open("dict/cols/x.txt")
