@@ -74,6 +74,7 @@ class MainWindow(wx.Frame):
     def __init__(self):
         super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1600, 600))
         self.xls = None
+        self.df_cache = None
         self.header = None
         self.menu = MainMenu()
         self.statusbar = MainStatusBar(self)
@@ -176,6 +177,9 @@ class MainWindow(wx.Frame):
         self.field_field.Append("Рассвумчоррский")
         self.field_field.Check(0)
         t_sz.Add(self.field_field, 1, wx.EXPAND)
+        self.field_group_checkbox = wx.CheckBox(self.left, label="Группировать по рудникам")
+        self.field_group_checkbox.SetValue(True)
+        t_sz.Add(self.field_group_checkbox)
         l_sz_in_h.Add(t_sz)
         l_sz_in.Add(l_sz_in_h, 0, wx.EXPAND | wx.BOTTOM, border=10)
         l_sz_in.AddStretchSpacer(1)
@@ -217,6 +221,7 @@ class MainWindow(wx.Frame):
         self.y_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.z_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.value_field.Bind(wx.EVT_CHOICE, self.render_grid)
+        self.field_group_checkbox.Bind(wx.EVT_CHECKBOX, self.render_grid)
         self.type_col_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.comment_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.source_file_field.Bind(wx.EVT_CHOICE, self.render_grid)
@@ -280,8 +285,10 @@ class MainWindow(wx.Frame):
         for item in self.header:
             self.date_field.Append(item)
 
+        self.df_cache = None
         self.suggest_columns()
         self.suggest_filter()
+        self.render_grid()
 
     def on_select_all_types(self, event):
         self.type_field.SetCheckedItems(list(range(15)))
@@ -322,11 +329,27 @@ class MainWindow(wx.Frame):
         del info
 
     def suggest_columns(self):
+        if self.xls is None:
+            return
+        
+        import os
+        import sys
+
+        def get_main_script_path():
+            if getattr(sys, 'frozen', False):  # приложение собрано PyInstaller
+                return os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                return os.path.dirname(os.path.abspath(sys.argv[0]))
+
         def sugg(field, sugg_dict_file, fallback_sugg_dict, default_offset):
+            if not os.path.isabs(sugg_dict_file):
+                sugg_dict_file = os.path.join(get_main_script_path(), sugg_dict_file)
             try:
-                with open("file.txt", "r") as f:
+                with open(sugg_dict_file, "r", encoding="utf-8") as f:
                     sugg_dict = f.readlines()
-            except (FileNotFoundError, PermissionError, IOError):
+                    sugg_dict = [line.strip() for line in sugg_dict]
+            except (FileNotFoundError, PermissionError, IOError) as e:
+                print("cannot load file %s, %s" % (sugg_dict_file, e))
                 sugg_dict = fallback_sugg_dict
             for item in self.header:
                 if item.strip() in sugg_dict:
@@ -344,7 +367,7 @@ class MainWindow(wx.Frame):
         sugg(self.y_field, "dict/cols/y.txt", ["EY", "Y"], 1)
         sugg(self.z_field, "dict/cols/z.txt", ["EZ", "Z"], 2)
         sugg(self.value_field, "dict/cols/value.txt", ["EEnergy", "Energy"], 3)
-        sugg(self.date_field, "dict/cols/date.txt", ["ELocTime"], 4)
+        sugg(self.date_field, "dict/cols/time.txt", ["ELocTime"], 4)
         sugg(
             self.type_col_field,
             "dict/cols/type_id.txt",
@@ -398,18 +421,25 @@ class MainWindow(wx.Frame):
         ]
         checked_indices = self.type_field.GetCheckedItems()
         selected_types = [self.type_field.GetString(i) for i in checked_indices]
+        sort_by_field = self.field_group_checkbox.IsChecked()
 
         comment_blacklist = []
         try:
-            with open("dict/comments/kir.txt") as f:
-                comment_blacklist.extend(f.readlines())
+            with open("dict/blacklist/kir.txt", "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                lines = [line.strip() for line in lines]
+                comment_blacklist.extend(lines)
         except Exception:
             ...
         try:
-            with open("dict/comments/ras.txt") as f:
-                comment_blacklist.extend(f.readlines())
+            with open("dict/blacklist/ras.txt", "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                lines = [line.strip() for line in lines]
+                comment_blacklist.extend(lines)
         except Exception:
             ...
+
+
         filename_mask = ()
         if self.field_field.IsChecked(0) and self.field_field.IsChecked(1):
             filename_mask = (".KIR", ".RAS")
@@ -418,6 +448,7 @@ class MainWindow(wx.Frame):
         elif self.field_field.IsChecked(1):
             filename_mask = ".RAS"
 
+        print(comment_blacklist)
         df = df[
             (df[x_col] != "")
             & (df[y_col] != "")
@@ -425,8 +456,13 @@ class MainWindow(wx.Frame):
             & (df[value_col] != "")
             & df[type_id_col].astype(str).isin(selected_types)
             & df[filename_col].str.endswith(filename_mask, na=False)
-            & ~df[comment_col].isin(comment_blacklist)
+            & ~df[comment_col].str.strip().isin(comment_blacklist)
         ]
+        df = df.copy()
+        if sort_by_field:
+            df.loc[:, 'suffix'] = df[filename_col].str[-4:]
+            df = df.sort_values(by=["suffix"])
+            df = df.drop(columns=["suffix"])
         return df
 
     def render_grid(self, event=None):
@@ -447,21 +483,19 @@ class MainWindow(wx.Frame):
         filename_col = self.source_file_field.GetStrings()[
             self.source_file_field.GetSelection()
         ]
-        df = pd.read_excel(
-            self.xls,
-            usecols=[
-                x_col,
-                y_col,
-                z_col,
-                value_col,
-                date_col,
-                comment_col,
-                type_id_col,
-                filename_col,
-            ],
-            dtype=str,
-            na_filter=False,
-        )
+        xls_list = self.excell_list_field.GetStrings()[
+            self.excell_list_field.GetSelection()
+        ]
+        if self.df_cache is None:
+            df = pd.read_excel(
+                self.xls,
+                dtype=str,
+                na_filter=False,
+                sheet_name=xls_list,
+            )
+            self.df_cache = df
+        else:
+            df = self.df_cache
         df = self.filter(df)
         self.statusbar.SetStatusText("Всего строк: %d" % df.shape[0])
         df = df.head(100)
