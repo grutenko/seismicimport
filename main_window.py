@@ -4,6 +4,7 @@ import pandas as pd
 from menu import MainMenu
 from statusbar import MainStatusBar
 from widgets.task import Task, TaskJob
+import wx.lib.mixins.listctrl as listmix
 
 import logging
 
@@ -26,6 +27,72 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 memory_handler.setFormatter(formatter)
 logger.addHandler(memory_handler)
 
+class VirtualListCtrl(wx.ListCtrl):
+    def __init__(self, parent):
+        super().__init__(parent, style=wx.LC_REPORT | wx.LC_VIRTUAL | wx.LC_SINGLE_SEL)
+        self.df = None
+        self.header = [""]
+        self.SetItemCount(0)
+        self.Bind(wx.EVT_KEY_DOWN, self.on_key)
+        self.Bind(wx.EVT_LIST_ITEM_RIGHT_CLICK, self.on_right_click)
+        self.current_row = None
+        self.current_col = None
+
+    def on_key(self, event):
+        if event.ControlDown() and event.GetKeyCode() == ord('C'):
+            if self.current_row is not None and self.current_col is not None:
+                value = self.GetItemText(self.current_row, self.current_col)
+                self.copy_to_clipboard(value)
+        else:
+            event.Skip()
+
+    def on_right_click(self, event):
+        # выясняем, на какую ячейку кликнули
+        x, y = event.GetPoint()
+        row, flags = self.HitTest((x, y))
+        if row != wx.NOT_FOUND:
+            col = self.get_column_from_x(x)
+            self.current_row = row
+            self.current_col = col
+
+            menu = wx.Menu()
+            item = menu.Append(wx.ID_COPY, "Копировать ячейку")
+            self.Bind(wx.EVT_MENU, self.on_copy, item)
+            self.PopupMenu(menu)
+            menu.Destroy()
+
+    def on_copy(self, event):
+        if self.current_row is not None and self.current_col is not None:
+            value = self.GetItemText(self.current_row, self.current_col)
+            self.copy_to_clipboard(value)
+
+    def copy_to_clipboard(self, text):
+        if wx.TheClipboard.Open():
+            wx.TheClipboard.SetData(wx.TextDataObject(text))
+            wx.TheClipboard.Close()
+            print(f"Copied: {text}")
+
+    def get_column_from_x(self, x):
+        """Определяем номер столбца по координате X"""
+        total = 0
+        for col in range(self.GetColumnCount()):
+            total += self.GetColumnWidth(col)
+            if x < total:
+                return col
+        return 0
+
+    
+    def update(self, df, header):
+        self.df = df
+        self.header = [code for code, name in header]
+        self.SetItemCount(len(df))
+        self.DeleteAllColumns()
+        for i, (code, name) in enumerate(header):
+            self.InsertColumn(i, name)
+        self.Refresh()
+
+    def OnGetItemText(self, item, col):
+        return self.df.loc[item, self.header[col]]
 
 class SaveExcelJob(TaskJob):
     def __init__(self, main_window, save_as):
@@ -161,6 +228,7 @@ class MainWindow(wx.Frame):
         t_sz_in.Add(self.clear_all_types_button)
         t_sz.Add(t_sz_in)
         self.type_field = wx.CheckListBox(self.left)
+        self.type_field.SetSize((-1, 70))
         for i in range(15):
             self.type_field.Append(str(i))
         t_sz.Add(self.type_field, 1, wx.EXPAND)
@@ -193,15 +261,7 @@ class MainWindow(wx.Frame):
         l_sz_in.Add(btn_sz)
         l_sz.Add(l_sz_in, 1, wx.EXPAND | wx.ALL, border=10)
         self.left.SetSizer(l_sz)
-        self.right = wx.ListCtrl(self.splitter, style=wx.LC_REPORT)
-        self.right.AppendColumn("Дата")
-        self.right.AppendColumn("Тип")
-        self.right.AppendColumn("X")
-        self.right.AppendColumn("Y")
-        self.right.AppendColumn("Z")
-        self.right.AppendColumn("Значение")
-        self.right.AppendColumn("Комментарий")
-        self.right.AppendColumn("Исходный файл")
+        self.right = VirtualListCtrl(self.splitter)
         self.splitter.SetMinimumPaneSize(250)
         self.splitter.SetSashGravity(0)
         self.splitter.SplitVertically(self.left, self.right, 550)
@@ -390,7 +450,20 @@ class MainWindow(wx.Frame):
     def suggest_filter(self):
         i = self.type_col_field.GetSelection()
         column = self.header[i]
-        df = pd.read_excel(self.xls, usecols=[column])
+        if self.df_cache is None:
+            xls_list = self.excell_list_field.GetStrings()[
+                self.excell_list_field.GetSelection()
+            ]
+            df = pd.read_excel(
+                self.xls,
+                dtype=str,
+                na_filter=False,
+                sheet_name=xls_list,
+            )
+            self.df_cache = df
+        else:
+            df = self.df_cache
+
         unique_values = df[column].unique()
         strings = self.type_field.GetStrings()
         for val in unique_values:
@@ -463,7 +536,7 @@ class MainWindow(wx.Frame):
             df.loc[:, 'suffix'] = df[filename_col].str[-4:]
             df = df.sort_values(by=["suffix"])
             df = df.drop(columns=["suffix"])
-        return df
+        return df.reset_index(drop=True)
 
     def render_grid(self, event=None):
         if self.xls is None:
@@ -498,21 +571,17 @@ class MainWindow(wx.Frame):
             df = self.df_cache
         df = self.filter(df)
         self.statusbar.SetStatusText("Всего строк: %d" % df.shape[0])
-        df = df.head(100)
-        self.right.DeleteAllItems()
-        for index, row in df.iterrows():
-            self.append_row(
-                [
-                    row[date_col],
-                    row[type_id_col],
-                    row[x_col],
-                    row[y_col],
-                    row[z_col],
-                    row[value_col],
-                    row[comment_col],
-                    row[filename_col],
-                ]
-            )
+        header = [
+            (type_id_col, "Тип"),
+            (x_col, "X"),
+            (y_col, "Y"),
+            (z_col, "Z"),
+            (value_col, "Энергия"),
+            (date_col, "Время события"),
+            (comment_col, "Комментарий"),
+            (filename_col, "Исходный файл"),
+        ]
+        self.right.update(df, header)
 
         for col in range(self.right.GetColumnCount()):
             self.right.SetColumnWidth(col, wx.LIST_AUTOSIZE)
