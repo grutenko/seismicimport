@@ -5,8 +5,11 @@ from menu import MainMenu
 from statusbar import MainStatusBar
 from widgets.task import Task, TaskJob
 import wx.lib.mixins.listctrl as listmix
+import numpy as np
+import traceback
 
 import logging
+
 
 class MemoryHandler(logging.Handler):
     def __init__(self):
@@ -19,6 +22,7 @@ class MemoryHandler(logging.Handler):
     def get_logs(self):
         return self.records
 
+
 logger = logging.getLogger("runtime")
 logger.setLevel(logging.DEBUG)
 
@@ -27,9 +31,74 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 memory_handler.setFormatter(formatter)
 logger.addHandler(memory_handler)
 
+# Считаем матрицу трансформации из системы АСКСМ в геодезическую
+G1 = [29929.634, 40713.921, 349.0]
+G2 = [30113.916, 40479.346, 379.0]
+G3 = [29970.552, 40564.192, 225.0]
+A1 = [3261.0, 1156.0, 97.0]
+A2 = [2993.0, 1025.0, 127.0]
+A3 = [3159.0, 1039.0, -27.0]
+source = np.array([A1, A2, A3])
+target = np.array([G1, G2, G3])
+
+
+def calculate_transformation_matrix(source, target):
+    """
+    Вычисляет матрицу преобразования 4x4 между системами координат
+    по трем парам точек.
+
+    :param source: Исходные точки (3x3 numpy array)
+    :param target: Целевые точки (3x3 numpy array)
+    :return: Матрица преобразования 4x4
+    """
+    # Центрирование точек
+    src_centroid = np.mean(source, axis=0)
+    tgt_centroid = np.mean(target, axis=0)
+
+    src_centered = source - src_centroid
+    tgt_centered = target - tgt_centroid
+
+    # Вычисление матрицы H
+    H = np.dot(src_centered.T, tgt_centered)
+
+    # SVD разложение
+    U, _, Vt = np.linalg.svd(H)
+
+    # Матрица вращения
+    R = np.dot(Vt.T, U.T)
+
+    # Коррекция отражений
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = np.dot(Vt.T, U.T)
+
+    # Вектор трансляции
+    t = tgt_centroid - np.dot(R, src_centroid)
+
+    # Формирование матрицы 4x4
+    matrix = np.eye(4)
+    matrix[:3, :3] = R
+    matrix[:3, 3] = t
+
+    return matrix
+
+
+ASKSM_GEOD = calculate_transformation_matrix(source, target)
+
+
+def calc_asksm_to_geodesic(x, y, z):
+    global ASKSM_GEOD
+    x = float(x)
+    y = float(y)
+    z = float(z)
+    gx, gy, gz = np.dot(ASKSM_GEOD, np.array([x, y, z, 1]))[:3]
+    return gx, gy, gz
+
+
 class VirtualListCtrl(wx.ListCtrl):
     def __init__(self, parent):
         super().__init__(parent, style=wx.LC_REPORT | wx.LC_VIRTUAL | wx.LC_SINGLE_SEL)
+        self.transform_cache = {}
         self.df = None
         self.header = [""]
         self.SetItemCount(0)
@@ -37,9 +106,12 @@ class VirtualListCtrl(wx.ListCtrl):
         self.Bind(wx.EVT_LIST_ITEM_RIGHT_CLICK, self.on_right_click)
         self.current_row = None
         self.current_col = None
+        self.x_col = -1
+        self.y_col = -1
+        self.z_col = -1
 
     def on_key(self, event):
-        if event.ControlDown() and event.GetKeyCode() == ord('C'):
+        if event.ControlDown() and event.GetKeyCode() == ord("C"):
             if self.current_row is not None and self.current_col is not None:
                 value = self.GetItemText(self.current_row, self.current_col)
                 self.copy_to_clipboard(value)
@@ -81,18 +153,25 @@ class VirtualListCtrl(wx.ListCtrl):
                 return col
         return 0
 
-    
-    def update(self, df, header):
+    def update(self, df, header, x_col=-1, y_col=-1, z_col=-1):
         self.df = df
-        self.header = [code for code, name in header]
+        self.header = header
         self.SetItemCount(len(df))
         self.DeleteAllColumns()
+        self.transform_cache = {}
         for i, (code, name) in enumerate(header):
             self.InsertColumn(i, name)
+
+        self.x_col = x_col
+        self.y_col = y_col
+        self.z_col = z_col
+        if self.x_col == -1 or self.y_col == -1 or self.z_col == -1:
+            print("X, Y, Z columns must be selected")
         self.Refresh()
 
     def OnGetItemText(self, item, col):
-        return self.df.loc[item, self.header[col]]
+        return self.df.loc[item, self.header[col][0]]
+
 
 class SaveExcelJob(TaskJob):
     def __init__(self, main_window, save_as):
@@ -101,52 +180,52 @@ class SaveExcelJob(TaskJob):
         self.save_as = save_as
 
     def run(self):
-        p = self.main_window
-        date_col = p.date_field.GetStrings()[p.date_field.GetSelection()]
-        x_col = p.x_field.GetStrings()[p.x_field.GetSelection()]
-        y_col = p.y_field.GetStrings()[p.y_field.GetSelection()]
-        z_col = p.z_field.GetStrings()[p.z_field.GetSelection()]
-        value_col = p.value_field.GetStrings()[p.value_field.GetSelection()]
-        type_id_col = p.type_col_field.GetStrings()[p.type_col_field.GetSelection()]
-        comment_col = p.comment_field.GetStrings()[p.comment_field.GetSelection()]
-        filename_col = p.source_file_field.GetStrings()[
-            p.source_file_field.GetSelection()
-        ]
-        df = pd.read_excel(
-            p.xls,
-            usecols=[
-                date_col,
-                type_id_col,
-                x_col,
-                y_col,
-                z_col,
-                value_col,
-                comment_col,
-                filename_col,
-            ],
-            na_filter=False,
-        )
-        df = p.filter(df)
         try:
-            df = df.drop(columns=[filename_col, comment_col])
-        except Exception:
-            ...
-        df_str = df.map(
-            lambda x: str(x).replace(".", ",") if isinstance(x, float) else x
-        )
-        df_str.to_excel(self.save_as, index=False)
+            p = self.main_window
+            date_col = p.date_field.GetStrings()[p.date_field.GetSelection()]
+            x_col = p.x_field.GetStrings()[p.x_field.GetSelection()]
+            y_col = p.y_field.GetStrings()[p.y_field.GetSelection()]
+            z_col = p.z_field.GetStrings()[p.z_field.GetSelection()]
+            value_col = p.value_field.GetStrings()[p.value_field.GetSelection()]
+            type_id_col = p.type_col_field.GetStrings()[p.type_col_field.GetSelection()]
+            xls_list = p.excell_list_field.GetStrings()[
+                p.excell_list_field.GetSelection()
+            ]
+            df = pd.read_excel(
+                p.xls_path,
+                dtype=str,
+                na_filter=False,
+                sheet_name=xls_list,
+            )
+            df = p.filter(df)
+            df = df[[type_id_col, x_col, y_col, z_col, value_col, date_col]]
+            df[value_col] = df[value_col].apply(lambda a: a.replace(".", ","))
+            df = df.rename(columns={
+                type_id_col: "TypeId",
+                x_col: "X",
+                y_col: "Y",
+                z_col: "Z",
+                value_col: "Energy",
+                date_col: "LocTime",
+            })
+            df_str = df.map(
+                lambda x: str(x).replace(".", ",") if isinstance(x, float) else x
+            )
+            df_str.to_excel(self.save_as, index=False)
+        except Exception as e:
+            tb = traceback.format_exc()
+            wx.LogError(f"Exception caught:\n{e}\nTraceback:\n{tb}")
+            raise e
 
 
 class MainWindow(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(1600, 600))
-        self.xls = None
+        super().__init__(None, title="Фильтр БД АСКСМ", size=wx.Size(550, 850))
+        self.xls_path = None
         self.df_cache = None
         self.header = None
         self.menu = MainMenu()
-        self.statusbar = MainStatusBar(self)
         self.SetMenuBar(self.menu)
-        self.SetStatusBar(self.statusbar)
         sz = wx.BoxSizer(wx.VERTICAL)
         self.splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
         self.left = wx.ScrolledWindow(self.splitter)
@@ -242,30 +321,30 @@ class MainWindow(wx.Frame):
         t_sz.Add(t_sz_in)
         self.field_field = wx.CheckListBox(self.left)
         self.field_field.Append("Кировский")
-        self.field_field.Append("Рассвумчоррский")
+        self.field_field.Append("Расвумчоррский")
         self.field_field.Check(0)
         t_sz.Add(self.field_field, 1, wx.EXPAND)
-        self.field_group_checkbox = wx.CheckBox(self.left, label="Группировать по рудникам")
-        self.field_group_checkbox.SetValue(True)
-        t_sz.Add(self.field_group_checkbox)
         l_sz_in_h.Add(t_sz)
         l_sz_in.Add(l_sz_in_h, 0, wx.EXPAND | wx.BOTTOM, border=10)
-        l_sz_in.AddStretchSpacer(1)
-        btn_sz = wx.StdDialogButtonSizer()
-        self.save_button = wx.Button(self.left, label="Сохранить")
-        self.open_button = wx.Button(self.left, label="Открыть в Excell")
-        btn_sz.Add(self.save_button, wx.RIGHT, border=10)
-        btn_sz.Add(self.open_button)
-        self.save_button.Disable()
-        self.open_button.Disable()
-        l_sz_in.Add(btn_sz)
         l_sz.Add(l_sz_in, 1, wx.EXPAND | wx.ALL, border=10)
         self.left.SetSizer(l_sz)
         self.right = VirtualListCtrl(self.splitter)
         self.splitter.SetMinimumPaneSize(250)
-        self.splitter.SetSashGravity(0)
-        self.splitter.SplitVertically(self.left, self.right, 550)
+        self.splitter.SetSashGravity(1)
+        self.splitter.SplitHorizontally(self.left, self.right, 400)
         sz.Add(self.splitter, 1, wx.EXPAND)
+        p = wx.Panel(self)
+        p_sz = wx.BoxSizer(wx.VERTICAL)
+        p.SetSizer(p_sz)
+        btn_sz = wx.StdDialogButtonSizer()
+        self.save_button = wx.Button(p, label="Сохранить")
+        self.open_button = wx.Button(p, label="Открыть в Excell")
+        btn_sz.Add(self.save_button, wx.RIGHT, border=10)
+        btn_sz.Add(self.open_button)
+        self.save_button.Disable()
+        self.open_button.Disable()
+        p_sz.Add(btn_sz, 0, wx.ALL | wx.ALIGN_RIGHT, border=5)
+        sz.Add(p, 0, wx.EXPAND)
         self.SetSizer(sz)
         self.Layout()
         self.Show()
@@ -281,7 +360,6 @@ class MainWindow(wx.Frame):
         self.y_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.z_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.value_field.Bind(wx.EVT_CHOICE, self.render_grid)
-        self.field_group_checkbox.Bind(wx.EVT_CHECKBOX, self.render_grid)
         self.type_col_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.comment_field.Bind(wx.EVT_CHOICE, self.render_grid)
         self.source_file_field.Bind(wx.EVT_CHOICE, self.render_grid)
@@ -311,15 +389,26 @@ class MainWindow(wx.Frame):
                 parent=self,
                 can_abort=False,
             )
-            self.save_task.then(lambda a: ..., lambda e: print(e))
+            self.save_task.then(self.on_resolve, self.on_reject)
             self.save_task.run()
 
+    def on_resolve(self, result):
+        ret = wx.MessageBox("Файл успешно сохранен. Открыть его в Excell?", "Сохранение завершено", wx.YES_NO | wx.ICON_QUESTION)
+        if ret == wx.YES:
+            import os
+            os.startfile(self.save_task.job.save_as)
+
+    def on_reject(self, error):
+        ...
+
     def on_select_excell_list(self, event):
-        sheets = self.xls.sheet_names
+        xls = pd.ExcelFile(self.xls_path)
+        sheets = xls.sheet_names
         self.header = pd.read_excel(
-            self.xls, nrows=0, sheet_name=sheets[self.excell_list_field.GetSelection()]
+            xls, nrows=0, sheet_name=sheets[self.excell_list_field.GetSelection()]
         ).columns.tolist()
         self.header = list(map(lambda x: x.strip(), self.header))
+        xls.close()
         self.x_field.Clear()
         for item in self.header:
             self.x_field.Append(item)
@@ -359,8 +448,8 @@ class MainWindow(wx.Frame):
         self.render_grid()
 
     def update_controls_state(self):
-        self.save_button.Enable(self.xls is not None)
-        self.open_button.Enable(self.xls is not None)
+        self.save_button.Enable(self.xls_path is not None)
+        self.open_button.Enable(self.xls_path is not None)
 
     def on_file_picker_changed(self, event):
         import os
@@ -369,12 +458,14 @@ class MainWindow(wx.Frame):
         if not os.path.exists(path):
             wx.MessageBox("Неверный файл: %s" % path)
             return
-        
+
         info = wx.BusyInfo("Загрузка данных, пожалуйста подождите...", parent=self.left)
         wx.Yield()  # даём GUI обновиться
 
-        self.xls = pd.ExcelFile(path)
-        lis_ = self.xls.sheet_names
+        self.xls_path = path
+        xls = pd.ExcelFile(path)
+        lis_ = xls.sheet_names
+        xls.close()
         self.excell_list_field.Clear()
         for item in lis_:
             self.excell_list_field.Append(item)
@@ -388,21 +479,19 @@ class MainWindow(wx.Frame):
         del info
 
     def suggest_columns(self):
-        if self.xls is None:
+        if self.xls_path is None:
             return
-        
+
         import os
         import sys
 
         def get_main_script_path():
-            if getattr(sys, 'frozen', False):  # приложение собрано PyInstaller
+            if getattr(sys, "frozen", False):  # приложение собрано PyInstaller
                 return os.path.dirname(os.path.abspath(sys.executable))
             else:
                 return os.path.dirname(os.path.abspath(sys.argv[0]))
 
         def sugg(field, sugg_dict_file, fallback_sugg_dict, default_offset):
-            if not os.path.isabs(sugg_dict_file):
-                sugg_dict_file = os.path.join(get_main_script_path(), sugg_dict_file)
             try:
                 with open(sugg_dict_file, "r", encoding="utf-8") as f:
                     sugg_dict = f.readlines()
@@ -454,7 +543,7 @@ class MainWindow(wx.Frame):
                 self.excell_list_field.GetSelection()
             ]
             df = pd.read_excel(
-                self.xls,
+                self.xls_path,
                 dtype=str,
                 na_filter=False,
                 sheet_name=xls_list,
@@ -493,7 +582,7 @@ class MainWindow(wx.Frame):
         ]
         checked_indices = self.type_field.GetCheckedItems()
         selected_types = [self.type_field.GetString(i) for i in checked_indices]
-        sort_by_field = self.field_group_checkbox.IsChecked()
+        sort_by_field = True
 
         kir_comment_blacklist = []
         try:
@@ -529,21 +618,25 @@ class MainWindow(wx.Frame):
             & df[type_id_col].astype(str).isin(selected_types)
             & df[filename_col].str.endswith(filename_mask, na=False)
         )
-        kir_mask = ~df[filename_col].str.endswith(".KIR", na=False) | ~df[comment_col].str.strip().apply(
+        kir_mask = ~df[filename_col].str.endswith(".KIR", na=False) | ~df[
+            comment_col
+        ].str.strip().apply(
             lambda x: any(fnmatch.fnmatch(x, p) for p in kir_comment_blacklist)
         )
-        ras_mask = ~df[filename_col].str.endswith(".RAS", na=False) | ~df[comment_col].str.strip().apply(
+        ras_mask = ~df[filename_col].str.endswith(".RAS", na=False) | ~df[
+            comment_col
+        ].str.strip().apply(
             lambda x: any(fnmatch.fnmatch(x, p) for p in ras_comment_blacklist)
         )
         df = df[mask & kir_mask & ras_mask].copy()
         if sort_by_field:
-            df.loc[:, 'suffix'] = df[filename_col].str[-4:]
+            df.loc[:, "suffix"] = df[filename_col].str[-4:]
             df = df.sort_values(by=["suffix"])
             df = df.drop(columns=["suffix"])
         return df.reset_index(drop=True)
 
     def render_grid(self, event=None):
-        if self.xls is None:
+        if self.xls_path is None:
             return
 
         info = wx.BusyInfo("Загрузка данных, пожалуйста подождите...", parent=self.left)
@@ -565,7 +658,7 @@ class MainWindow(wx.Frame):
         ]
         if self.df_cache is None:
             df = pd.read_excel(
-                self.xls,
+                self.xls_path,
                 dtype=str,
                 na_filter=False,
                 sheet_name=xls_list,
@@ -574,7 +667,6 @@ class MainWindow(wx.Frame):
         else:
             df = self.df_cache
         df = self.filter(df)
-        self.statusbar.SetStatusText("Всего строк: %d" % df.shape[0])
         header = [
             (type_id_col, "Тип"),
             (x_col, "X"),
@@ -585,7 +677,7 @@ class MainWindow(wx.Frame):
             (comment_col, "Комментарий"),
             (filename_col, "Исходный файл"),
         ]
-        self.right.update(df, header)
+        self.right.update(df, header, x_col=1, y_col=2, z_col=3)
 
         for col in range(self.right.GetColumnCount()):
             self.right.SetColumnWidth(col, wx.LIST_AUTOSIZE)

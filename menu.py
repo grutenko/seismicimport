@@ -2,6 +2,7 @@ import sys
 import wx
 import os
 import subprocess
+import resourcelocation
 
 class MainMenu(wx.MenuBar):
     def __init__(self):
@@ -40,11 +41,6 @@ class MainMenu(wx.MenuBar):
         self.Append(m, "&Помощь")
 
     def open(self, filename):
-        if getattr(sys, 'frozen', False):  # если упаковано в exe
-            exe_dir = os.path.dirname(sys.executable)
-        else:
-            exe_dir = os.path.dirname(os.path.abspath(__file__))
-        os.path.isabs(filename) or (filename := os.path.join(exe_dir, filename)) # type: ignore
         try:
             open(filename, "a").close()
         except Exception as e:

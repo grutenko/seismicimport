@@ -4,6 +4,7 @@ import wx
 import time
 import hashlib
 
+import resourcelocation
 from main_window import MainWindow
 
 if __name__ == "__main__":
@@ -70,15 +71,23 @@ if __name__ == "__main__":
                 f.suggest_columns()
             f.render_grid()
 
-    if getattr(sys, "frozen", False):  # если упаковано в exe
+    if hasattr(sys, 'frozen'):
+        os.chdir(os.path.dirname(sys.executable))
+    if getattr(sys, 'frozen', False):
+        # exe запущен из onefile PyInstaller
         exe_dir = os.path.dirname(sys.executable)
     else:
-        exe_dir = os.path.dirname(os.path.abspath(__file__))
-    dirname = os.path.join(exe_dir, "dict")
-    event_handler = FileChangeHandler(dirname)
-    observer = Observer()
-    observer.schedule(
-        event_handler, dirname, recursive=True, event_filter=[FileModifiedEvent]
-    )  # следим за текущей папкой
-    observer.start()
+        # обычный запуск из скрипта
+        exe_dir = os.path.dirname(__file__)
+
+    dict_path = os.path.join(exe_dir, "dict")  # ваш файл dict рядом с exe
+
+    # проверка
+    if os.path.exists(dict_path):
+        event_handler = FileChangeHandler(dict_path)
+        observer = Observer()
+        observer.schedule(
+            event_handler, dict_path, recursive=True, event_filter=[FileModifiedEvent]
+        )  # следим за текущей папкой
+        observer.start()
     app.MainLoop()
